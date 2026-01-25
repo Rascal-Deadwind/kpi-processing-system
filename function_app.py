@@ -62,7 +62,8 @@ CONFIG_SHEETS = {
     'thresholds_ot': 'Config_Thresholds_OT',
     'kpis': 'Config_KPIs',
     'colours': 'Config_Colours',
-    'competency_history': 'Config_Competency_History'
+    'competency_history': 'Config_Competency_History',
+    'team_ave_thresholds': 'Config_TeamAve_Thresholds'
 }
 
 # Default colours (will be overridden by config)
@@ -418,6 +419,37 @@ def load_config(token):
                     config['competency_history'].append(record)
         
         logging.info(f"Loaded {len(config['competency_history'])} competency history records")
+    else:
+        logging.info("No Config_Competency_History sheet found - using current competencies only")
+        
+    # Load team average threshold history (for tracking team benchmark changes over time)
+    config['team_ave_thresholds'] = []
+    if CONFIG_SHEETS.get('team_ave_thresholds') and CONFIG_SHEETS['team_ave_thresholds'] in wb.sheetnames:
+        ws = wb[CONFIG_SHEETS['team_ave_thresholds']]
+        headers = [cell.value for cell in ws[1]]
+        
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row[0]:  # Has a team name
+                record = dict(zip(headers, row))
+                # Ensure EffectiveDate is a date object
+                effective_date = record.get('EffectiveDate')
+                if effective_date:
+                    # Handle both datetime and date objects
+                    if hasattr(effective_date, 'date'):
+                        record['EffectiveDate'] = effective_date.date()
+                    elif not isinstance(effective_date, date):
+                        # Try to parse string date
+                        try:
+                            from datetime import datetime as dt
+                            record['EffectiveDate'] = dt.strptime(str(effective_date), '%Y-%m-%d').date()
+                        except:
+                            logging.warning(f"Could not parse date for team {record.get('Team')}: {effective_date}")
+                            continue
+                    config['team_ave_thresholds'].append(record)
+        
+        logging.info(f"Loaded {len(config['team_ave_thresholds'])} team average threshold records")
+    else:
+        logging.info("No Config_TeamAve_Thresholds sheet found - using static Team Average thresholds")
     
     # Load colours
     if CONFIG_SHEETS['colours'] in wb.sheetnames:
