@@ -294,6 +294,118 @@ def get_competency_ranges_for_therapist(therapist_name, year, data_cols, config)
     return ranges if len(ranges) > 1 else None  # Only return if there are multiple ranges
 
 
+def get_team_ave_threshold_ranges(team_name, year, data_cols, config):
+    """
+    Get column ranges for each threshold period for a team's billing row.
+    
+    Similar to get_competency_ranges_for_therapist but for team averages.
+    
+    Returns list of tuples: [(thresholds_dict, start_col, end_col), ...]
+    
+    Example for OT team (thresholds change in March when grads join):
+    [({'green_min': 4.3, ...}, 3, 4), ({'green_min': 4.0, ...}, 5, 15)]
+    # C-D for Jan-Feb, E-O for Mar-Dec+Avg
+    
+    Returns None if no history exists (use static thresholds instead).
+    """
+    from datetime import date
+    
+    history = config.get('team_ave_thresholds', [])
+    
+    # Get records for this team
+    team_records = [
+        r for r in history
+        if r.get('Team', '').strip() == team_name.strip()
+        and r.get('EffectiveDate')
+    ]
+    
+    if not team_records or not year:
+        # No history - return None to use standard single-range formatting
+        return None
+    
+    # Sort by date ascending
+    team_records.sort(key=lambda r: r.get('EffectiveDate'))
+    
+    # Build month -> column mapping (excluding Average)
+    month_cols = {m: c for m, c in data_cols.items() if m != 'Average'}
+    avg_col = data_cols.get('Average')
+    
+    # Sort months by their calendar order
+    sorted_months = sorted(month_cols.items(), key=lambda x: MONTH_TO_NUM.get(x[0], 99))
+    
+    # Determine thresholds for each month
+    month_thresholds = {}
+    for month_name, col in sorted_months:
+        month_num = MONTH_TO_NUM.get(month_name)
+        if not month_num:
+            continue
+        
+        # Target date is mid-month of that month in the given year
+        target_date = date(year, month_num, 15)
+        
+        # Find applicable thresholds (latest record where EffectiveDate <= target)
+        applicable_thresholds = None
+        for record in team_records:
+            eff_date = record.get('EffectiveDate')
+            if hasattr(eff_date, 'date'):
+                eff_date = eff_date.date()
+            if eff_date <= target_date:
+                applicable_thresholds = {
+                    'red_below': record.get('Billings_Red_Below'),
+                    'green_min': record.get('Billings_Green_Min'),
+                    'green_max': record.get('Billings_Green_Max'),
+                    'blue_above': record.get('Billings_Blue_Above')
+                }
+        
+        if applicable_thresholds:
+            # Create a hashable key for grouping (based on threshold values)
+            threshold_key = (
+                applicable_thresholds.get('green_min'),
+                applicable_thresholds.get('blue_above')
+            )
+            month_thresholds[month_name] = (applicable_thresholds, threshold_key, col)
+    
+    if not month_thresholds:
+        return None
+    
+    # Group consecutive months with same thresholds into ranges
+    ranges = []
+    current_key = None
+    current_thresholds = None
+    range_start_col = None
+    range_end_col = None
+    
+    for month_name, col in sorted_months:
+        if month_name not in month_thresholds:
+            continue
+        thresholds, threshold_key, col = month_thresholds[month_name]
+        
+        if threshold_key == current_key:
+            # Extend current range
+            range_end_col = col
+        else:
+            # Save previous range if exists
+            if current_thresholds is not None:
+                ranges.append((current_thresholds, range_start_col, range_end_col))
+            # Start new range
+            current_key = threshold_key
+            current_thresholds = thresholds
+            range_start_col = col
+            range_end_col = col
+    
+    # Don't forget the last range
+    if current_thresholds is not None:
+        ranges.append((current_thresholds, range_start_col, range_end_col))
+    
+    # Add Average column to the last threshold's range
+    if ranges and avg_col:
+        last_thresholds, last_start, last_end = ranges[-1]
+        ranges[-1] = (last_thresholds, last_start, avg_col)
+    
+    # Only return if there are multiple ranges (otherwise use static formatting)
+    return ranges if len(ranges) > 1 else None
+
+
 # =============================================================================
 # FORMATTING RULES
 # =============================================================================
@@ -376,8 +488,11 @@ def apply_rating_rules(ws, row_range, first_col, row_idx, rating_thresholds, fil
 # FORMAT AVERAGE TABLES
 # =============================================================================
 
-def format_average_table(ws, table_name, table_config, sheet_config, config, fills):
-    """Format average tables - each row may have different KPI type."""
+def format_average_table(ws, table_name, table_config, sheet_config, config, fills, year=None):
+    """Format average tables - each row may have different KPI type.
+    
+    For billing rows, supports historical threshold changes via Config_TeamAve_Thresholds.
+    """
     table_info = get_table_info(ws, table_name)
     if not table_info or not table_info['data_cols']:
         logging.warning(f"Average table '{table_name}' not found or empty")
@@ -386,6 +501,7 @@ def format_average_table(ws, table_name, table_config, sheet_config, config, fil
     first_col = min(table_info['data_cols'].values())
     last_col = max(table_info['data_cols'].values())
     team_type = table_config.get('team_type') or sheet_config.get('team_type')
+    team_name = sheet_config.get('team_name')  # e.g., 'Physio_North', 'OT'
     
     rows_formatted = 0
     
@@ -399,14 +515,29 @@ def format_average_table(ws, table_name, table_config, sheet_config, config, fil
         row_kpi_type = detect_row_kpi_type(row_label)
         
         if row_kpi_type == 'billing':
-            thresholds = config.get('thresholds', {}).get(team_type, {}).get('Team Average')
-            if not thresholds:
-                thresholds = config.get('thresholds', {}).get(team_type, {}).get('CA')
-            if thresholds:
-                apply_billing_rules(ws, row_range, first_col, row_idx, thresholds, fills)
+            # Check for team average threshold history - use column ranges if available
+            threshold_ranges = get_team_ave_threshold_ranges(
+                team_name, year, table_info['data_cols'], config
+            )
+            
+            if threshold_ranges:
+                # Apply different thresholds to different column ranges
+                for thresholds, start_col, end_col in threshold_ranges:
+                    if thresholds:
+                        range_str = f"{get_column_letter(start_col)}{row_idx}:{get_column_letter(end_col)}{row_idx}"
+                        apply_billing_rules(ws, range_str, start_col, row_idx, thresholds, fills)
                 rows_formatted += 1
+                logging.info(f"  {table_name} billing row: {len(threshold_ranges)} threshold ranges applied")
             else:
-                logging.warning(f"No Team Average or CA thresholds for {team_type}")
+                # Fall back to static thresholds
+                thresholds = config.get('thresholds', {}).get(team_type, {}).get('Team Average')
+                if not thresholds:
+                    thresholds = config.get('thresholds', {}).get(team_type, {}).get('CA')
+                if thresholds:
+                    apply_billing_rules(ws, row_range, first_col, row_idx, thresholds, fills)
+                    rows_formatted += 1
+                else:
+                    logging.warning(f"No Team Average or CA thresholds for {team_type}")
                 
         elif row_kpi_type == 'ceased':
             apply_ceased_rules(ws, row_range, first_col, row_idx,
@@ -505,7 +636,7 @@ def format_kpi_table(ws, table_name, table_config, sheet_config, competency_map,
     kpi_type = table_config.get('kpi_type', 'rating')
     
     if kpi_type in ('average', 'mmp_average') or table_config.get('is_average'):
-        return format_average_table(ws, table_name, table_config, sheet_config, config, fills)
+        return format_average_table(ws, table_name, table_config, sheet_config, config, fills, year)
     else:
         return format_regular_table(ws, table_name, table_config, sheet_config, competency_map, config, fills, year)
 
