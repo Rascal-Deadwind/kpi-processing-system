@@ -1,0 +1,8 @@
+# Azure Functions
+azure-functions>=1.17.0
+
+# Microsoft Graph API
+requests>=2.31.0
+
+# Excel processing
+openpyxl>=3.1.2
