@@ -503,6 +503,15 @@ def format_average_table(ws, table_name, table_config, sheet_config, config, fil
     team_type = table_config.get('team_type') or sheet_config.get('team_type')
     team_name = sheet_config.get('team_name')  # e.g., 'Physio_North', 'OT'
     
+    # For MMP tables, derive team_name from table name
+    if sheet_config.get('is_mmp'):
+        if 'North' in table_name:
+            team_name = 'Physio_North'
+        elif 'South' in table_name:
+            team_name = 'Physio_South'
+        elif 'OT' in table_name:
+            team_name = 'OT'
+    
     rows_formatted = 0
     
     for row_idx in range(table_info['min_row'] + 1, table_info['max_row'] + 1):
